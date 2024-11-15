@@ -51,7 +51,7 @@ def print_now(return_flag=0):
         pass
 
 # Sentence Generator (Decoder) for GPT-3 ...
-def decoder_for_gpt3(args, input, max_length, i, k):
+def openai_complete(args, input, max_length, i, k):
     
     # GPT-3 API allows each users execute the API within 60 times in a minute ...
     # time.sleep(1)
@@ -61,35 +61,25 @@ def decoder_for_gpt3(args, input, max_length, i, k):
     openai.api_key = os.getenv("OPENAI_API_KEY")
     #print(openai.api_key)
     
-    # Specify engine ...
-    # Instruct GPT3
-    if args.model == "gpt3":
-        engine = "text-ada-001"
-    elif args.model == "gpt3-medium":
-        engine = "text-babbage-001"
-    elif args.model == "gpt3-large":
-        engine = "text-curie-001"
-    elif args.model == "gpt3-xl":
-        engine = "text-davinci-002"
-    else:
-        raise ValueError("model is not properly defined ...")
-        
-    response = openai.Completion.create(
-      engine=engine,
-      prompt=input,
+    response = openai.chat.completions.create(
+      model=args.model,
+      messages=[{"role": "user", "content": input}],
       max_tokens=max_length,
       temperature=0,
-      stop=None
+      stop=None,
+      stream=False
     )
+    generated = response.choices[0].message.content
+    print(f'input={input}\nresponse={generated}')
     
-    return response["choices"][0]["text"]
+    return generated
 
 class Decoder():
     def __init__(self, args):
         print_now()
  
     def decode(self, args, input, max_length, i, k):
-        response = decoder_for_gpt3(args, input, max_length, i, k)
+        response = openai_complete(args, input, max_length, i, k)
         return response
 
 def data_reader(args):
@@ -238,6 +228,10 @@ class MyDataset(Dataset):
         input = self.questions[index]
         output = self.answers[index]
         return input, output
+    
+def seed_worker(worker_seed):
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 def setup_data_loader(args):
 
@@ -246,9 +240,6 @@ def setup_data_loader(args):
     fix_seed(args.random_seed)
     worker_seed = torch.initial_seed() % 2**32
     print("worker_seed : {}".format(worker_seed))
-    def seed_worker(worker_id):
-        np.random.seed(worker_seed)
-        random.seed(worker_seed)
     g = torch.Generator()
     g.manual_seed(worker_seed)
     
@@ -269,35 +260,54 @@ def setup_data_loader(args):
 
     return dataloader
 
+
+def preprocess_prediction(args, pred):
+    if args.method in ("few_shot", "few_shot_cot"):
+        preds = pred.split(args.direct_answer_trigger_for_fewshot)
+        answer_flag = True if len(preds) > 1 else False
+        pred = preds[-1]
+        
+    # Define regex patterns for specific datasets
+    regex_patterns = {
+        "aqua": r'[A-E]',
+        "commonsensqa": r'[A-E]',
+        "bigbench_date": r'[A-F]',
+        "object_tracking": r'[A-C]',
+        "numeric_datasets": r'-?\d+\.?\d*',
+        "yes_no_datasets": r'\b(yes|no)\b'
+    }
+
+    # Normalize prediction string by removing specific unwanted characters
+    pred = pred.lower().strip()
+
+    # Handle predictions based on dataset
+    if args.dataset in ("aqua", "commonsensqa"):
+        pred = re.findall(regex_patterns["aqua"], pred)
+    elif args.dataset == "bigbench_date":
+        pred = re.findall(regex_patterns["bigbench_date"], pred)
+    elif args.dataset == "object_tracking":
+        pred = re.findall(regex_patterns["object_tracking"], pred)
+    elif args.dataset in ("gsm8k", "addsub", "multiarith", "svamp", "singleeq"):
+        pred = pred.replace(",", "")
+        pred = re.findall(regex_patterns["numeric_datasets"], pred)
+    elif args.dataset in ("strategyqa", "coin_flip"):
+        pred = re.sub(r'[\"\'\n\.\:\,\s]', " ", pred).split()
+        pred = [i for i in pred if i in ("yes", "no")]
+    elif args.dataset == "last_letters":
+        pred = re.sub(r'[\"\'\n\s]', "", pred)
+        pred = [pred]
+    else:
+        raise ValueError("Dataset is not properly defined.")
+
+    return pred
+
+
 # ver 0.2
 def answer_cleansing(args, pred):
 
     print("pred_before : " + pred)
-    
-    if args.method in ("few_shot", "few_shot_cot"):
-        preds = pred.split(args.direct_answer_trigger_for_fewshot)
-        answer_flag = True if len(preds) > 1 else False 
-        pred = preds[-1]
 
-    if args.dataset in ("aqua", "commonsensqa"):
-        pred = re.findall(r'A|B|C|D|E', pred)
-    elif args.dataset == "bigbench_date":
-        pred = re.findall(r'A|B|C|D|E|F', pred)
-    elif args.dataset in ("object_tracking"):
-        pred = re.findall(r'A|B|C', pred)
-    elif args.dataset in ("gsm8k", "addsub", "multiarith", "svamp", "singleeq"):
-        pred = pred.replace(",", "")
-        pred = [s for s in re.findall(r'-?\d+\.?\d*', pred)]
-    elif args.dataset in ("strategyqa", "coin_flip"):
-        pred = pred.lower()
-        pred = re.sub("\"|\'|\n|\.|\s|\:|\,"," ", pred)
-        pred = pred.split(" ")
-        pred = [i for i in pred if i in ("yes", "no")]
-    elif args.dataset == "last_letters":
-        pred = re.sub("\"|\'|\n|\.|\s","", pred)
-        pred = [pred]
-    else:
-        raise ValueError("dataset is not properly defined ...")
+    pred = preprocess_prediction(args, pred)
 
     # If there is no candidate in list, null is set.
     if len(pred) == 0:

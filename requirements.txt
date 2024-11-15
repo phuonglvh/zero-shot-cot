@@ -1,1 +1,6 @@
-openai==0.18.0
+# ensure: python 3.11 or below
+torch==2.0.0
+torchtext==0.15.1
+openai
+pandas==2.2.3
+numpy==1.24.0
